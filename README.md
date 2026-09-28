@@ -1,45 +1,70 @@
-# TripGo — репозиторий для лабораторных работ
+# Trip Service
 
-Заготовка курса «Разработка микросервисов на Go». Здесь вы делаете все пять
-работ: каждая следующая продолжает предыдущую, переписывать сервис с нуля не
-нужно.
+Лаба 1: HTTP API + PostgreSQL.
 
-## Что делать сразу
+## Запуск
 
-1. **Fork** этого репозитория к себе. Форк нужен, чтобы преподаватели видели
-   список всех работ курса одной страницей.
-2. Заведите модуль:
+Нужны Go, Docker, make, tripgoctl.
 
 ```bash
-git clone git@github.com:<ваш-логин>/<ваш-репозиторий>.git
-cd <ваш-репозиторий>
-go mod init github.com/<ваш-логин>/<ваш-репозиторий>
+tripgoctl cluster start
+tripgoctl environment start
+tripgoctl connect
+make migrate
+make run
 ```
 
-Путь модуля потом не меняется — иначе придётся править все импорты. Проще всего
-взять адрес своего репозитория, каким бы он ни был.
+Адрес берётся из `HTTP_ADDR` (обычно `:8080`).
 
-Дальше — [`homework/docs/getting-started.md`](https://github.com/course-go-autumn-2026/course/blob/main/homework/docs/getting-started.md)
-в репозитории курса: инструменты, окружение, миграции, вид сданной работы.
+## Env
 
-## Где что лежит
+Смотри `.env.example`. Обязательные:
 
-| Что | Где |
-|---|---|
-| Задания, документация, контракты | [`course-go-autumn-2026/course`](https://github.com/course-go-autumn-2026/course) |
-| Слайды и записи лекций | [`lections/`](https://github.com/course-go-autumn-2026/course/tree/main/lections) |
-| Как оценивают, дедлайны, порядок сдачи | [`homework/docs/grading.md`](https://github.com/course-go-autumn-2026/course/blob/main/homework/docs/grading.md) |
-| Локальное окружение и утилита `tripgoctl` | [`course-go-autumn-2026/course-infra`](https://github.com/course-go-autumn-2026/course-infra) |
+- `HTTP_ADDR`
+- `LOG_LEVEL`
+- `SHUTDOWN_TIMEOUT`
+- `DATABASE_URL`
+- `DATABASE_MAX_CONNS`
+- `DATABASE_MIN_CONNS`
+- `DATABASE_MAX_CONN_LIFETIME`
+- `DATABASE_CONNECT_TIMEOUT`
+- `DATABASE_QUERY_TIMEOUT`
 
-Задания появляются по мере курса, каждое — после своей пары лекций.
+`.env` в git не кладём.
 
-## Как сдавать
+## Команды
 
-Ветка `homework/NN` от `main`, pull request в `main` своего форка, ссылка
-ментору до дедлайна. Подробно — в `grading.md` репозитория курса.
+```bash
+make generate
+make migrate
+make migrate-down
+make run
+make test
+make build
+```
 
-## Чужие работы
+Пример:
 
-Форки видны всем, включая ваши. Смотреть чужие решения, пока идёт курс, —
-плохая идея: одинаковый код виден сразу, а разбираться на защите придётся
-самому.
+```bash
+curl -sS -X POST localhost:8080/api/v1/trips \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c","driver_id":"8860b315-ec86-42eb-a17c-7c163d721ff5","start_point":{"latitude":59.9398,"longitude":30.3146},"end_point":{"latitude":59.9290,"longitude":30.3626},"price":1450}'
+```
+
+## Что сделано
+
+create / get / finish trip, `/health`, `/ready`, миграции, codegen из OpenAPI, pgx + squirrel, TxManager, `problem+json`.
+
+## Решения
+
+**Изоляция:** Read Committed. Для `driver_busy` хватает partial unique index, для finish — `UPDATE ... WHERE status = 'active'`.
+
+**TxManager:** `Do` открывает tx, кладёт в context, на ошибке/панике rollback. Репозиторий сам достаёт tx или pool. Вложенный `Do` ту же tx не открывает заново.
+
+**Две активные поездки:**
+
+```sql
+CREATE UNIQUE INDEX trips_one_active_per_driver_idx ON trips (driver_id) WHERE (status = 'active');
+```
+
+`23505` → `409 driver_busy`.
