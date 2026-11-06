@@ -4,5 +4,7 @@
 
 # Сборка
 bin/
+.cache/
+coverage.out
 
 .DS_Store

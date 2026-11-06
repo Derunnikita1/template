@@ -1,4 +1,4 @@
-.PHONY: generate migrate migrate-down run test lint build
+.PHONY: generate migrate migrate-down run test test-integration lint build
 
 ifneq (,$(wildcard .env))
 include .env
@@ -12,6 +12,7 @@ generate:
 		-include-operation-ids createTrip,getTrip,finishTrip,health,ready \
 		-o internal/generated/api.gen.go \
 		contracts/openapi/trip-service.openapi.yaml
+	go generate ./internal/usecase/... ./internal/http/trip/...
 
 migrate:
 	go tool goose -dir migrations postgres "$(DATABASE_URL)" up
@@ -23,7 +24,11 @@ run:
 	go run ./cmd/trip-service
 
 test:
-	go test -race ./...
+	go test -race -count=2 -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
+test-integration:
+	go test -race -count=2 -tags=integration ./internal/repository/...
 
 lint:
 	golangci-lint run ./...
