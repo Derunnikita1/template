@@ -30,6 +30,12 @@ type Trip struct {
 	UpdatedAt      time.Time
 }
 
+type StaleTrip struct {
+	TripID     uuid.UUID
+	DriverID   uuid.UUID
+	StaleSince time.Time
+}
+
 type NewTrip struct {
 	ID             uuid.UUID
 	UserID         uuid.UUID
@@ -44,10 +50,10 @@ type NewTrip struct {
 
 func New(input NewTrip) (Trip, error) {
 	if input.UserID == uuid.Nil {
-		return Trip{}, ValidationError{Field: "user_id", Reason: "must not be empty"}
+		return Trip{}, ValidationError{Field: "user_id", Reason: requiredValueReason}
 	}
 	if input.DriverID == uuid.Nil {
-		return Trip{}, ValidationError{Field: "driver_id", Reason: "must not be empty"}
+		return Trip{}, ValidationError{Field: "driver_id", Reason: requiredValueReason}
 	}
 	if err := validateCoordinate("start_point.latitude", input.StartLatitude, -90, 90); err != nil {
 		return Trip{}, err

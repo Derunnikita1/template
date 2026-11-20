@@ -1,6 +1,6 @@
 # Trip Service
 
-Сервис поездок с HTTP API, PostgreSQL и телеметрией OpenTelemetry.
+Сервис поездок с HTTP API, PostgreSQL, фоновым опросом координат и телеметрией OpenTelemetry.
 
 ## Требования
 
@@ -41,6 +41,15 @@ make run
 - `OTEL_EXPORTER_OTLP_PROTOCOL`
 - `OTEL_RESOURCE_ATTRIBUTES`
 - `OTEL_TRACES_SAMPLER`
+- `PUSH_HTTP_URL`
+
+Параметры опроса устаревших поездок имеют значения по умолчанию:
+
+- `POSITION_CHECK_INTERVAL=30s`;
+- `POSITION_STALE_AFTER=60s`;
+- `POSITION_WORKERS=4`;
+- `POSITION_QUEUE_SIZE=100`;
+- `PUSH_REQUEST_TIMEOUT=1s`.
 
 HTTP-таймауты `HTTP_READ_TIMEOUT`, `HTTP_READ_HEADER_TIMEOUT`, `HTTP_WRITE_TIMEOUT` и `HTTP_IDLE_TIMEOUT` можно переопределить. Полный пример находится в `.env.example`.
 
@@ -67,7 +76,15 @@ curl -i -X POST localhost:8080/api/v1/trips \
   -d '{"user_id":"5cb72c04-7650-45c9-a79b-bcdba0631e0c","driver_id":"8860b315-ec86-42eb-a17c-7c163d721ff5","start_point":{"latitude":59.9398,"longitude":30.3146},"end_point":{"latitude":59.929,"longitude":30.3626},"price":1450}'
 ```
 
-Сервис поддерживает создание, получение и завершение поездки, а также `/health` и `/ready`. Контракт находится в `contracts/openapi/trip-service.openapi.yaml`.
+Сервис поддерживает создание, получение и завершение поездки, сохранение координат, получение маршрута, а также `/health` и `/ready`. Контракт находится в `contracts/openapi/trip-service.openapi.yaml`.
+
+```bash
+curl -i -X POST localhost:8080/api/v1/trips/$TRIP_ID/positions \
+  -H 'content-type: application/json' \
+  -d '{"coordinates":{"latitude":59.93,"longitude":30.33},"recorded_at":"2026-11-20T12:00:00Z"}'
+
+curl -i localhost:8080/api/v1/trips/$TRIP_ID/positions
+```
 
 ## Архитектура
 
@@ -90,6 +107,22 @@ container ──► все конкретные реализации
 - `internal/infra/telemetry` создаёт логгер, OpenTelemetry SDK, экспортёры, метрики и корреляцию логов с трейсами.
 - `internal/container` является composition root: создаёт конкретные реализации и связывает их. `cmd/trip-service/main.go` только загружает конфигурацию, создаёт контейнер и управляет временем жизни процесса.
 
+## Опрос устаревших поездок
+
+```text
+тикер → сканер PostgreSQL → ограниченная FIFO-очередь → worker pool → Push Service
+                                 ↑
+                         отмена при координате
+```
+
+На каждом тике один сканер выбирает активные поездки, у которых `COALESCE(last_position_at, started_at)` старше `POSITION_STALE_AFTER`. Условие времени и сортировка выполняются в одном SQL-запросе. Частичный индекс `trips_active_position_poll_idx` исключает полный просмотр таблицы.
+
+Очередь реализована буферизованным каналом ёмкостью `POSITION_QUEUE_SIZE`, пул состоит из `POSITION_WORKERS` постоянных воркеров. Защищённая mutex структура не допускает повторной постановки одной поездки. Сохранение координаты удаляет поездку из этой структуры, поэтому оставшаяся в канале задача отбрасывается без обращения в Push Service.
+
+Сканер никогда не ждёт свободного места в канале. При заполненной очереди задача получает результат `dropped`, пишется Warn-лог, а поездка снова попадёт в SQL-выборку на следующем тике. Ретраев и rate limiter в гейтвее нет: выполняется одна HTTP-попытка с `PUSH_REQUEST_TIMEOUT`.
+
+При остановке сначала завершается HTTP-сервер, затем останавливается сканер, воркеры дорабатывают очередь в пределах `SHUTDOWN_TIMEOUT`, после чего закрываются HTTP-клиент, PostgreSQL и телеметрия.
+
 Интерфейсы размещены у потребителя, потому что именно потребитель определяет минимальный набор нужных ему методов. Это сохраняет use case независимыми от конкретной базы и упрощает генерацию узких моков. При добавлении второго транспорта use case и домен не изменятся: новый транспорт будет преобразовывать свой контракт во входные данные существующих сценариев.
 
 ## Ошибки
@@ -104,6 +137,8 @@ container ──► все конкретные реализации
 - тесты HTTP-обработчиков через `httptest` и моки use case;
 - интеграционные тесты репозитория с реальным PostgreSQL;
 - интеграционный тест полного отката вставки поездки и истории статусов.
+- интеграционные тесты выборки устаревших поездок и атомарного сохранения координаты;
+- тесты дедупликации, отмены, переполнения очереди, фиксированного пула и остановки с `goleak`.
 
 Моки генерируются директивами `go:generate` и коммитятся рядом с тестами.
 
@@ -120,6 +155,12 @@ Middleware выполняются в порядке `Recover → Tracing → Log
 - `tripgo.trips.created`;
 - `tripgo.trips.completed`;
 - `tripgo.trips.active`;
+- `tripgo.positions.saved`;
+- `tripgo.stale_checks`;
+- `tripgo.position_requests.queue.size`;
+- `tripgo.position_requests.workers.active`;
+- `tripgo.position_requests`;
+- `tripgo.position_requests.duration`;
 - JSON-логи `slog` с `service`, `trace_id` и `span_id`.
 
 Для проверки нужно создать поездку, найти HTTP-трейс с дочерним PostgreSQL-спаном в Jaeger, найти метрики в Grafana и сопоставить `trace_id` из лога с трейсом. Недоступность коллектора не влияет на HTTP API и работу с PostgreSQL.

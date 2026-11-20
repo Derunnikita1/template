@@ -1,53 +1,51 @@
 ## Что сделано
 
-- сервис разделён на domain, use case, HTTP transport, repository и infra;
-- интерфейсы объявлены на стороне потребителей и собираются в container;
-- доменные ошибки переводятся в RFC 9457 Problem в одном месте;
-- добавлены unit-, handler- и integration-тесты;
-- добавлены golangci-lint, gomock и покрытие;
-- подключены JSON-логи, OpenTelemetry-трейсы и метрики;
-- PostgreSQL инструментирован на уровне пула;
-- сохранён прежний OpenAPI-контракт и существующие миграции.
+- добавлена миграция `last_position_at`, `trip_positions` и частичного индекса для сканера;
+- добавлены `POST` и `GET /api/v1/trips/{tripId}/positions`;
+- сохранение координаты и обновление поездки выполняются через `TxManager`;
+- `GREATEST` в SQL не позволяет опоздавшей координате уменьшить `last_position_at`;
+- добавлен один сканер с подменяемым тикером, ограниченная FIFO-очередь и фиксированный worker pool;
+- реализованы дедупликация, отмена задачи координатой и неблокирующий `dropped` при заполнении очереди;
+- добавлен HTTP-гейтвей Push Service без ретраев, с отдельным клиентом и таймаутом;
+- добавлены метрики пула, span link и тесты с `-race` и `goleak`.
 
-## Схема слоёв
+## Схема
 
 ```text
-HTTP ──► use case ──► domain
-                 ▲
-repository ──────┘
-infra ──► repository, container
-container ──► конкретные реализации
+тикер → сканер PostgreSQL → ограниченная очередь → worker pool → Push Service
+                                  ↑
+                          отмена при координате
 ```
-
-Интерфейсы находятся в `contract.go` пакета-потребителя. Use case определяет минимальные методы хранилища и транзакций, а HTTP-обработчик определяет минимальный интерфейс use case. Благодаря этому домен и сценарии не зависят от PostgreSQL и HTTP.
-
-## Принятые решения
-
-- переход `active → completed` выполняет доменная модель;
-- создание поездки и запись истории статуса выполняются в одной транзакции;
-- конкурентное завершение защищено условием `status = active` в UPDATE;
-- уникальный partial index преобразуется в `ErrDriverBusy`;
-- неизвестные ошибки не раскрывают детали клиенту;
-- middleware выполняются в порядке Recover → Tracing → Logging → Metrics;
-- PostgreSQL-спаны и `db.client.operation.duration` создаются обёрткой трассировщика пула;
-- недоступность OTLP Collector не блокирует запуск и обработку запросов.
 
 ## Проверки
 
-- `make lint` — 0 issues;
-- `make test` — успешно с `-race`, домен и use case покрыты на 80–89%;
-- `make test-integration` — успешно с `-race`, включая полный rollback двух INSERT;
-- создание поездки — 201;
-- `trace_id` совпадает в бизнес-логе, access-log и Jaeger;
-- в Jaeger видны HTTP-спан и дочерние `BEGIN`, `INSERT`, `INSERT`, `COMMIT`;
-- в Grafana видны HTTP-метрика и счётчик созданных поездок.
+- `golangci-lint run ./...` — `0 issues`;
+- `go test -race -count=2 ./...` — успешно;
+- интеграционные тесты репозитория с `-race` — успешно;
+- миграции применяются до версии 3;
+- маршрут сортируется по `recorded_at`, затем по `id`;
+- Push Service получает `REQUEST_POSITION` каждые `POSITION_CHECK_INTERVAL`;
+- при задержке Push Service очередь заполняется, растёт `dropped`, HTTP API продолжает отвечать.
 
-## Скриншоты
+## Метрики worker pool под нагрузкой
 
-### Jaeger
+![Worker pool metrics](screenshots/grafana-worker-pool.png)
 
-![Jaeger trace](screenshots/jaeger-trace.jpg)
+Во время проверки использовались 200 устаревших активных поездок, очередь размером 100 и задержка Push Service 5 секунд. После проверки задержка сброшена до нуля.
 
-### Grafana
+## EXPLAIN ANALYZE
 
-![Grafana metrics](screenshots/grafana-metrics.jpg)
+План получен на таблице с 5202 поездками. Последовательного просмотра таблицы нет, используется `trips_active_position_poll_idx`:
+
+```text
+Sort  (actual time=0.524..0.528 rows=12 loops=1)
+  Sort Key: (COALESCE(last_position_at, started_at)), id
+  ->  Bitmap Heap Scan on trips  (actual time=0.120..0.253 rows=12 loops=1)
+        Recheck Cond: ((COALESCE(last_position_at, started_at) < (now() - '00:01:00'::interval)) AND (status = 'active'::text))
+        ->  Bitmap Index Scan on trips_active_position_poll_idx  (actual time=0.086..0.087 rows=12 loops=1)
+              Index Cond: (COALESCE(last_position_at, started_at) < (now() - '00:01:00'::interval))
+Planning Time: 5.093 ms
+Execution Time: 0.773 ms
+```
+
+Полный вывод сохранён в `docs/explain-analyze.txt`.
