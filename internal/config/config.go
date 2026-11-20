@@ -27,10 +27,16 @@ type Config struct {
 	OTelExporterProtocol    string
 	OTelResourceAttributes  string
 	OTelTracesSampler       string
+	PositionCheckInterval   time.Duration
+	PositionStaleAfter      time.Duration
+	PositionWorkers         int
+	PositionQueueSize       int
+	PushHTTPURL             string
+	PushRequestTimeout      time.Duration
 }
 
 func Load() (Config, error) {
-	loaders := []func(*Config) error{loadHTTP, loadDatabase, loadTelemetry}
+	loaders := []func(*Config) error{loadHTTP, loadDatabase, loadTelemetry, loadPositions}
 	var cfg Config
 	for _, load := range loaders {
 		if err := load(&cfg); err != nil {
@@ -38,6 +44,29 @@ func Load() (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func loadPositions(cfg *Config) error {
+	var err error
+	if cfg.PositionCheckInterval, err = optionalDuration("POSITION_CHECK_INTERVAL", 30*time.Second); err != nil {
+		return err
+	}
+	if cfg.PositionStaleAfter, err = optionalDuration("POSITION_STALE_AFTER", 60*time.Second); err != nil {
+		return err
+	}
+	if cfg.PositionWorkers, err = optionalInt("POSITION_WORKERS", 4); err != nil {
+		return err
+	}
+	if cfg.PositionQueueSize, err = optionalInt("POSITION_QUEUE_SIZE", 100); err != nil {
+		return err
+	}
+	if cfg.PushHTTPURL, err = required("PUSH_HTTP_URL"); err != nil {
+		return err
+	}
+	if cfg.PushRequestTimeout, err = optionalDuration("PUSH_REQUEST_TIMEOUT", time.Second); err != nil {
+		return err
+	}
+	return nil
 }
 
 func loadHTTP(cfg *Config) error {
@@ -167,4 +196,19 @@ func requiredInt32(name string) (int32, error) {
 		return 0, fmt.Errorf("%s must be greater than zero", name)
 	}
 	return int32(number), nil
+}
+
+func optionalInt(name string, defaultValue int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return defaultValue, nil
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if number <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", name)
+	}
+	return number, nil
 }

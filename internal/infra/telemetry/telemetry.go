@@ -17,6 +17,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
+	apitrace "go.opentelemetry.io/otel/trace"
 )
 
 const scope = "github.com/Derunnikita1/template"
@@ -32,6 +33,7 @@ type Provider struct {
 	Logger  *slog.Logger
 	Metrics *Metrics
 	Meter   apimetric.MeterProvider
+	Tracer  apitrace.TracerProvider
 	traces  *trace.TracerProvider
 	metrics *sdkmetric.MeterProvider
 }
@@ -91,6 +93,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		Logger:  logger,
 		Metrics: appMetrics,
 		Meter:   metricProvider,
+		Tracer:  traceProvider,
 		traces:  traceProvider,
 		metrics: metricProvider,
 	}, nil

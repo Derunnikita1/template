@@ -11,6 +11,8 @@ var (
 	ErrDriverBusy    = errors.New("driver already has an active trip")
 )
 
+const requiredValueReason = "must not be empty"
+
 type ValidationError struct {
 	Field  string
 	Reason string
